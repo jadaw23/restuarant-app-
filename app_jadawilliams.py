@@ -1,370 +1,618 @@
 import streamlit as st
-import mysql.connector
 import pandas as pd
-import folium
-from streamlit_folium import st_folium
+import numpy as np
+import sqlite3
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime, timedelta
+import requests
+from io import BytesIO
+from PIL import Image
 
-# ============================================================================
-# BLOCK 1: PAGE CONFIGURATION
-# ============================================================================
+# Page configuration
 st.set_page_config(
-    page_title="Restaurant Dashboard",
-    page_icon="🍽️",
-    layout="wide"
+    page_title="NBA Contract Analytics",
+    page_icon="🏀",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# ============================================================================
-# BLOCK 2: CUSTOM STYLING (CUSTOMIZATION #1) - PINK & GREEN THEME
-# ============================================================================
+# Custom CSS
 st.markdown("""
-    <style>
-    .big-font {
-        font-size:30px !important;
+<style>
+    .main-header {
+        font-size: 3rem;
         font-weight: bold;
-        color: #FF1493;
+        color: #1D428A;
+        text-align: center;
+        margin-bottom: 2rem;
     }
-    .metric-container {
-        background: linear-gradient(135deg, #FFB6D9 0%, #B4F8C8 100%);
+    .metric-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         padding: 20px;
         border-radius: 10px;
-        margin: 10px 0;
+        color: white;
+        text-align: center;
     }
-    /* Pink and Green themed buttons and elements */
-    .stButton>button {
-        background-color: #FF1493 !important;
-        color: white !important;
-        border: 2px solid #32CD32 !important;
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 24px;
     }
-    .stButton>button:hover {
-        background-color: #32CD32 !important;
-        border: 2px solid #FF1493 !important;
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        padding: 0 24px;
+        background-color: #f0f2f6;
+        border-radius: 5px;
     }
-    /* Sidebar styling */
-    [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #FFE5F0 0%, #E5FFE5 100%);
-    }
-    /* Headers with pink/green */
-    h1, h2, h3 {
-        color: #FF1493 !important;
-    }
-    /* Success messages in green */
-    .stSuccess {
-        background-color: #B4F8C8 !important;
-        color: #006400 !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+</style>
+""", unsafe_allow_html=True)
 
 # ============================================================================
-# BLOCK 3: DATABASE CONNECTION
+# DATABASE INITIALIZATION
 # ============================================================================
-@st.cache_resource
-def get_database_connection():
-    """Establish connection to MySQL database"""
-    try:
-        connection = mysql.connector.connect(
-            host='db-mysql-itom-do-user-28250611-0.j.db.ondigitalocean.com',
-            port=25060,
-            user='restaurant_readonly',
-            password='SecurePassword123!',
-            database='restaurant'
+
+def init_database():
+    """Initialize SQLite database with NBA data"""
+    conn = sqlite3.connect('nba_contracts.db', check_same_thread=False)
+    cursor = conn.cursor()
+    
+    # Create Players table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS players (
+            player_id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            position TEXT,
+            team TEXT,
+            age INTEGER,
+            height TEXT,
+            weight INTEGER,
+            years_in_league INTEGER,
+            draft_year INTEGER,
+            draft_position INTEGER
         )
-        return connection
-    except mysql.connector.Error as err:
-        st.error(f"❌ Database connection failed: {err}")
-        return None
+    ''')
+    
+    # Create Contracts table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS contracts (
+            contract_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            player_id INTEGER,
+            team TEXT,
+            start_date DATE,
+            end_date DATE,
+            total_value REAL,
+            annual_salary REAL,
+            contract_type TEXT,
+            FOREIGN KEY (player_id) REFERENCES players(player_id)
+        )
+    ''')
+    
+    # Create Performance Stats table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS performance_stats (
+            stat_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            player_id INTEGER,
+            season TEXT,
+            games_played INTEGER,
+            minutes_per_game REAL,
+            points_per_game REAL,
+            rebounds_per_game REAL,
+            assists_per_game REAL,
+            field_goal_pct REAL,
+            three_point_pct REAL,
+            free_throw_pct REAL,
+            usage_rate REAL,
+            win_shares REAL,
+            per REAL,
+            FOREIGN KEY (player_id) REFERENCES players(player_id)
+        )
+    ''')
+    
+    # Create Injuries table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS injuries (
+            injury_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            player_id INTEGER,
+            injury_type TEXT,
+            injury_date DATE,
+            return_date DATE,
+            games_missed INTEGER,
+            recurring BOOLEAN,
+            FOREIGN KEY (player_id) REFERENCES players(player_id)
+        )
+    ''')
+    
+    # Create Teams table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS teams (
+            team_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            team_name TEXT NOT NULL,
+            city TEXT,
+            conference TEXT,
+            division TEXT,
+            current_payroll REAL,
+            salary_cap_space REAL,
+            luxury_tax_status TEXT
+        )
+    ''')
+    
+    conn.commit()
+    return conn
 
-# Test database connection
-conn = get_database_connection()
-if conn and conn.is_connected():
-    st.sidebar.success("✅ Database connected successfully!")
-    # Test query to verify data
+# ============================================================================
+# DATA LOADING & SAMPLE DATA
+# ============================================================================
+
+def load_sample_data(conn):
+    """Load sample NBA data"""
+    cursor = conn.cursor()
+    
+    # Check if data already exists
+    cursor.execute("SELECT COUNT(*) FROM players")
+    if cursor.fetchone()[0] > 0:
+        return
+    
+    # Sample Players (using real NBA player IDs)
+    players = [
+        (2544, 'LeBron James', 'SF', 'Los Angeles Lakers', 39, '6-9', 250, 21, 2003, 1),
+        (201939, 'Stephen Curry', 'PG', 'Golden State Warriors', 36, '6-2', 185, 15, 2009, 7),
+        (203507, 'Giannis Antetokounmpo', 'PF', 'Milwaukee Bucks', 29, '6-11', 243, 11, 2013, 15),
+        (203999, 'Nikola Jokic', 'C', 'Denver Nuggets', 29, '6-11', 284, 9, 2014, 41),
+        (1629029, 'Luka Doncic', 'PG', 'Dallas Mavericks', 25, '6-7', 230, 6, 2018, 3),
+        (203954, 'Joel Embiid', 'C', 'Philadelphia 76ers', 30, '7-0', 280, 9, 2014, 3),
+        (201142, 'Kevin Durant', 'SF', 'Phoenix Suns', 36, '6-10', 240, 17, 2007, 2),
+        (203081, 'Damian Lillard', 'PG', 'Milwaukee Bucks', 34, '6-2', 195, 12, 2012, 6),
+        (202331, 'Kawhi Leonard', 'SF', 'Los Angeles Clippers', 33, '6-7', 225, 13, 2011, 15),
+        (1628369, 'Jayson Tatum', 'SF', 'Boston Celtics', 26, '6-8', 210, 7, 2017, 3),
+        (1629630, 'Tyrese Haliburton', 'PG', 'Indiana Pacers', 24, '6-5', 185, 4, 2020, 12),
+        (1630162, 'Anthony Edwards', 'SG', 'Minnesota Timberwolves', 23, '6-4', 225, 4, 2020, 1),
+        (203076, 'Anthony Davis', 'PF', 'Los Angeles Lakers', 31, '6-10', 253, 12, 2012, 1),
+        (1628983, 'Shai Gilgeous-Alexander', 'PG', 'Oklahoma City Thunder', 26, '6-6', 195, 6, 2018, 11),
+        (1629027, 'Trae Young', 'PG', 'Atlanta Hawks', 26, '6-1', 164, 6, 2018, 5),
+    ]
+    
+    cursor.executemany('INSERT OR IGNORE INTO players VALUES (?,?,?,?,?,?,?,?,?,?)', players)
+    
+    # Sample Contracts
+    contracts = []
+    for player_id, name, pos, team, age, ht, wt, yrs, draft_yr, draft_pos in players:
+        # Generate realistic contract values
+        if age < 26:
+            salary = np.random.uniform(25, 40)
+        elif age < 30:
+            salary = np.random.uniform(35, 52)
+        else:
+            salary = np.random.uniform(30, 48)
+        
+        start_date = '2023-07-01'
+        end_date = '2027-06-30'
+        total_value = salary * 4
+        
+        contracts.append((player_id, team, start_date, end_date, total_value, salary, 'Max Contract'))
+    
+    cursor.executemany('''
+        INSERT INTO contracts (player_id, team, start_date, end_date, total_value, annual_salary, contract_type)
+        VALUES (?,?,?,?,?,?,?)
+    ''', contracts)
+    
+    # Sample Performance Stats (2023-24 season)
+    stats = [
+        (2544, '2023-24', 71, 35.3, 25.7, 7.3, 8.3, 54.0, 41.0, 75.0, 28.5, 7.2, 25.8),
+        (201939, '2023-24', 74, 32.7, 26.4, 4.5, 5.1, 45.0, 40.8, 92.3, 29.2, 8.5, 27.4),
+        (203507, '2023-24', 73, 35.2, 30.4, 11.5, 6.5, 61.1, 27.4, 65.7, 35.2, 11.8, 31.2),
+        (203999, '2023-24', 79, 34.6, 26.4, 12.4, 9.0, 58.3, 35.9, 81.7, 28.3, 13.7, 29.8),
+        (1629029, '2023-24', 70, 37.5, 33.9, 9.2, 9.8, 48.7, 38.2, 78.6, 36.8, 10.2, 28.7),
+        (203954, '2023-24', 39, 34.7, 34.7, 11.0, 5.6, 52.9, 38.8, 88.3, 37.1, 9.8, 31.4),
+        (201142, '2023-24', 75, 37.2, 27.1, 6.6, 5.0, 52.3, 41.3, 85.6, 30.5, 9.5, 27.8),
+        (203081, '2023-24', 58, 35.3, 24.3, 4.2, 7.0, 42.2, 35.4, 92.0, 30.1, 6.8, 23.9),
+        (202331, '2023-24', 68, 34.1, 23.7, 6.1, 3.6, 52.5, 41.7, 88.5, 29.8, 7.4, 25.3),
+        (1628369, '2023-24', 74, 35.7, 26.9, 8.1, 4.9, 47.1, 37.6, 83.3, 29.6, 8.9, 25.0),
+        (1629630, '2023-24', 69, 32.7, 20.1, 3.9, 10.9, 47.7, 36.4, 85.5, 24.8, 7.1, 22.6),
+        (1630162, '2023-24', 79, 35.1, 25.9, 5.4, 5.1, 46.1, 35.7, 83.6, 30.2, 8.3, 23.4),
+        (203076, '2023-24', 76, 35.5, 24.7, 12.6, 3.5, 55.6, 27.1, 81.6, 28.7, 9.4, 27.8),
+        (1628983, '2023-24', 75, 33.9, 30.1, 5.5, 6.2, 53.5, 35.3, 87.4, 33.4, 10.8, 30.2),
+        (1629027, '2023-24', 54, 36.2, 25.7, 2.8, 10.8, 43.0, 37.3, 86.0, 32.5, 5.7, 24.1),
+    ]
+    
+    cursor.executemany('''
+        INSERT INTO performance_stats (player_id, season, games_played, minutes_per_game, 
+        points_per_game, rebounds_per_game, assists_per_game, field_goal_pct, 
+        three_point_pct, free_throw_pct, usage_rate, win_shares, per)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ''', stats)
+    
+    # Sample Injuries
+    injuries = [
+        (2544, 'Ankle Sprain', '2024-01-15', '2024-02-01', 8, False),
+        (203954, 'Knee Surgery', '2024-02-01', '2024-04-15', 32, True),
+        (202331, 'Knee Inflammation', '2023-12-10', '2024-01-05', 12, True),
+        (203081, 'Calf Strain', '2024-01-20', '2024-02-28', 18, False),
+    ]
+    
+    cursor.executemany('''
+        INSERT INTO injuries (player_id, injury_type, injury_date, return_date, games_missed, recurring)
+        VALUES (?,?,?,?,?,?)
+    ''', injuries)
+    
+    # Sample Teams
+    teams = [
+        ('Los Angeles Lakers', 'Los Angeles', 'Western', 'Pacific', 178.5, -38.5, 'Over Cap'),
+        ('Golden State Warriors', 'San Francisco', 'Western', 'Pacific', 192.3, -52.3, 'Luxury Tax'),
+        ('Milwaukee Bucks', 'Milwaukee', 'Eastern', 'Central', 168.7, -28.7, 'Over Cap'),
+        ('Denver Nuggets', 'Denver', 'Western', 'Northwest', 162.4, -22.4, 'Over Cap'),
+        ('Dallas Mavericks', 'Dallas', 'Western', 'Southwest', 155.8, -15.8, 'Under Cap'),
+    ]
+    
+    cursor.executemany('''
+        INSERT INTO teams (team_name, city, conference, division, current_payroll, salary_cap_space, luxury_tax_status)
+        VALUES (?,?,?,?,?,?,?)
+    ''', teams)
+    
+    conn.commit()
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+def get_player_image(player_id):
+    """Fetch player image from NBA.com"""
+    url = f"https://ak-static.cms.nba.com/wp-content/uploads/headshots/nba/latest/260x190/{player_id}.png"
     try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM business_location")
-        count = cursor.fetchone()[0]
-        st.sidebar.info(f"📊 Total restaurants in DB: {count}")
-        cursor.close()
-    except Exception as e:
-        st.sidebar.error(f"Query test failed: {e}")
-else:
-    st.sidebar.error("❌ Database connection failed!")
+        response = requests.get(url, timeout=3)
+        if response.status_code == 200:
+            return Image.open(BytesIO(response.content))
+    except:
+        pass
+    return None
 
-# ============================================================================
-# BLOCK 4: HELPER FUNCTIONS
-# ============================================================================
-def get_vote_range():
-    """Get minimum and maximum vote counts from database"""
-    if conn:
-        try:
-            cursor = conn.cursor()
-            cursor.execute("SELECT MIN(votes) as min_votes, MAX(votes) as max_votes FROM business_location")
-            result = cursor.fetchone()
-            cursor.close()
-            if result and result[0] is not None and result[1] is not None:
-                return int(result[0]), int(result[1])
-            else:
-                st.warning("⚠️ No vote data found in database")
-                return 0, 1000
-        except Exception as e:
-            st.error(f"Error getting vote range: {e}")
-            return 0, 1000
-    return 0, 1000
-
-def search_restaurants(name_pattern, min_votes, max_votes):
-    """Search restaurants based on filters"""
-    if conn:
-        try:
-            cursor = conn.cursor()
-            query = """
-                SELECT name, votes, city 
-                FROM business_location 
-                WHERE name LIKE %s 
-                AND votes BETWEEN %s AND %s 
-                ORDER BY votes DESC
-            """
-            cursor.execute(query, (f'%{name_pattern}%', min_votes, max_votes))
-            results = cursor.fetchall()
-            cursor.close()
-            return results
-        except Exception as e:
-            st.error(f"Database query error: {e}")
-            return []
-    return []
-
-def get_restaurant_locations():
-    """Get restaurant coordinates for map"""
-    if conn:
-        try:
-            query = """
-                SELECT name, latitude, longitude 
-                FROM business_location 
-                WHERE latitude IS NOT NULL 
-                AND longitude IS NOT NULL
-            """
-            df = pd.read_sql(query, conn)
-            return df
-        except Exception as e:
-            st.error(f"Error loading map data: {e}")
-            return pd.DataFrame()
-    return pd.DataFrame()
-
-# ============================================================================
-# BLOCK 5: SIDEBAR NAVIGATION
-# ============================================================================
-st.sidebar.title("🍽️ Navigation")
-tab_selection = st.sidebar.radio(
-    "Select a tab:",
-    ["📋 HW Summary", "🔍 Database Search", "🗺️ Interactive Map"]
-)
-
-# ============================================================================
-# TAB 1: HW SUMMARY
-# ============================================================================
-if tab_selection == "📋 HW Summary":
-    st.markdown('<p class="big-font">Restaurant Dashboard - Homework Summary</p>', unsafe_allow_html=True)
+def calculate_value_index(row):
+    """Calculate player value index (0-100)"""
+    # Normalize stats
+    ppg_norm = min(row['points_per_game'] / 35, 1) * 30
+    per_norm = min(row['per'] / 35, 1) * 25
+    ws_norm = min(row['win_shares'] / 15, 1) * 20
+    efficiency = (row['field_goal_pct'] / 60) * 15
+    availability = (row['games_played'] / 82) * 10
     
-    # CUSTOMIZATION: Using columns for layout (CUSTOMIZATION #2)
-    col1, col2 = st.columns([1, 2])
+    value = ppg_norm + per_norm + ws_norm + efficiency + availability
+    return round(value, 1)
+
+def calculate_contract_efficiency(stats_df, contracts_df):
+    """Calculate contract efficiency rating"""
+    merged = pd.merge(stats_df, contracts_df, on='player_id')
+    merged['value_index'] = merged.apply(calculate_value_index, axis=1)
+    merged['efficiency_rating'] = (merged['value_index'] / merged['annual_salary']) * 10
+    return merged
+
+# ============================================================================
+# DATABASE QUERY FUNCTIONS
+# ============================================================================
+
+@st.cache_data
+def get_all_players(_conn):
+    """Get all players"""
+    return pd.read_sql_query("SELECT * FROM players", _conn)
+
+@st.cache_data
+def get_player_stats(_conn):
+    """Get player statistics"""
+    return pd.read_sql_query("SELECT * FROM performance_stats", _conn)
+
+@st.cache_data
+def get_contracts(_conn):
+    """Get contract data"""
+    return pd.read_sql_query("SELECT * FROM contracts", _conn)
+
+@st.cache_data
+def get_injuries(_conn):
+    """Get injury data"""
+    return pd.read_sql_query("SELECT * FROM injuries", _conn)
+
+@st.cache_data
+def get_teams(_conn):
+    """Get team data"""
+    return pd.read_sql_query("SELECT * FROM teams", _conn)
+
+def get_player_details(_conn, player_id):
+    """Get detailed player information"""
+    query = f"""
+        SELECT p.*, ps.*, c.annual_salary, c.contract_type, c.end_date
+        FROM players p
+        LEFT JOIN performance_stats ps ON p.player_id = ps.player_id
+        LEFT JOIN contracts c ON p.player_id = c.player_id
+        WHERE p.player_id = {player_id}
+    """
+    return pd.read_sql_query(query, _conn)
+
+# ============================================================================
+# MAIN APP
+# ============================================================================
+
+def main():
+    # Initialize database
+    conn = init_database()
+    load_sample_data(conn)
+    
+    # Sidebar
+    st.sidebar.image("https://cdn.nba.com/logos/leagues/logo-nba.svg", width=100)
+    st.sidebar.title("Navigation")
+    
+    page = st.sidebar.radio(
+        "Select Page",
+        ["🏠 Dashboard", "👤 Player Database", "📊 Analytics", "💰 Contract Manager", 
+         "🏥 Injury Tracker", "💬 SQL Chat"]
+    )
+    
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Database Stats")
+    players_df = get_all_players(conn)
+    st.sidebar.metric("Total Players", len(players_df))
+    st.sidebar.metric("Active Contracts", len(get_contracts(conn)))
+    st.sidebar.metric("Total Injuries", len(get_injuries(conn)))
+    
+    # Main content
+    if page == "🏠 Dashboard":
+        show_dashboard(conn)
+    elif page == "👤 Player Database":
+        show_player_database(conn)
+    elif page == "📊 Analytics":
+        show_analytics(conn)
+    elif page == "💰 Contract Manager":
+        show_contract_manager(conn)
+    elif page == "🏥 Injury Tracker":
+        show_injury_tracker(conn)
+    elif page == "💬 SQL Chat":
+        show_sql_chat(conn)
+
+# ============================================================================
+# PAGE: DASHBOARD
+# ============================================================================
+
+def show_dashboard(conn):
+    st.markdown('<h1 class="main-header">🏀 NBA Contract Analytics Dashboard</h1>', unsafe_allow_html=True)
+    
+    # Load data
+    players_df = get_all_players(conn)
+    stats_df = get_player_stats(conn)
+    contracts_df = get_contracts(conn)
+    
+    # Merge data
+    merged_df = pd.merge(players_df, stats_df, on='player_id')
+    merged_df = pd.merge(merged_df, contracts_df, on='player_id')
+    merged_df['value_index'] = merged_df.apply(calculate_value_index, axis=1)
+    
+    # Top metrics
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        st.image("https://cdn-icons-png.flaticon.com/512/3081/3081559.png", width=150)
-    
+        st.metric("Total Payroll", f"${merged_df['annual_salary'].sum():.1f}M")
     with col2:
-        st.markdown("### 👤 MSBA STUDENT AT SMU")
-        st.write("**Name:** Jada Williams")
-        st.write("**Course:** ITOM6265")
-        st.write("**Assignment:** Restaurant Dashboard with Streamlit")
-        st.write("**Date:** November 2024")
-    
-    st.markdown("---")
-    
-    st.markdown("### 🎨 Customizations Implemented")
-    
-    customizations = {
-        "1. Custom CSS Styling - Pink & Green Theme": "Added custom pink and green gradient colors for headers, buttons, sidebar, and metric containers",
-        "2. Two-Column Layout": "Used Streamlit columns for better visual organization in Summary tab",
-        "3. Custom Map Tiles": "Implemented CartoDB Positron tiles for the interactive map (instead of default OpenStreetMap)",
-        "4. Enhanced Data Display": "Color-coded result counts and styled tables with custom pink/green formatting",
-        "5. Interactive Widgets": "Added emoji icons and captions for better user experience with pink/green hover effects"
-    }
-    
-    for title, description in customizations.items():
-        with st.container():
-            st.markdown(f"**{title}**")
-            st.info(description)
-    
-    st.markdown("---")
-    st.markdown("### 📊 Dashboard Features")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.metric("Database Connection", "Active ✅")
-    
-    with col2:
-        st.metric("Search Filters", "Name + Votes")
-    
+        st.metric("Avg Contract Value", f"${merged_df['annual_salary'].mean():.1f}M")
     with col3:
-        st.metric("Map Markers", "Interactive 📍")
-
-# ============================================================================
-# TAB 2: DATABASE SEARCH (QUESTION 1 - 40 POINTS)
-# ============================================================================
-elif tab_selection == "🔍 Database Search":
-    st.title("🔍 Restaurant Database Search")
-    st.markdown("Search for restaurants by name and vote count")
+        st.metric("Top Performer", merged_df.loc[merged_df['value_index'].idxmax(), 'name'])
+    with col4:
+        avg_value = merged_df['value_index'].mean()
+        st.metric("Avg Value Index", f"{avg_value:.1f}")
     
-    # Get vote range from database
-    min_votes_db, max_votes_db = get_vote_range()
+    st.markdown("---")
     
-    # CUSTOMIZATION: Using columns for input layout (CUSTOMIZATION #2 continued)
+    # Top performers
     col1, col2 = st.columns(2)
     
     with col1:
-        name_input = st.text_input(
-            "🏪 Restaurant Name",
-            placeholder="Enter restaurant name (e.g., Dishoom)",
-            help="Leave empty to show all restaurants"
-        )
+        st.subheader("🌟 Top 5 Performers by Value Index")
+        top_performers = merged_df.nlargest(5, 'value_index')[['name', 'team', 'value_index', 'points_per_game']]
+        st.dataframe(top_performers, hide_index=True, use_container_width=True)
     
     with col2:
-        vote_range = st.slider(
-            "📊 Vote Range",
-            min_value=int(min_votes_db),
-            max_value=int(max_votes_db),
-            value=(int(min_votes_db), int(max_votes_db)),
-            help="Filter restaurants by number of votes"
+        st.subheader("💰 Highest Paid Players")
+        top_paid = merged_df.nlargest(5, 'annual_salary')[['name', 'team', 'annual_salary', 'value_index']]
+        top_paid['annual_salary'] = top_paid['annual_salary'].apply(lambda x: f"${x:.1f}M")
+        st.dataframe(top_paid, hide_index=True, use_container_width=True)
+    
+    st.markdown("---")
+    
+    # Visualizations
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("📈 Performance vs Salary")
+        fig = px.scatter(
+            merged_df,
+            x='annual_salary',
+            y='value_index',
+            size='points_per_game',
+            color='position',
+            hover_data=['name', 'team'],
+            title='Player Value Analysis',
+            labels={'annual_salary': 'Annual Salary ($M)', 'value_index': 'Value Index'}
         )
+        st.plotly_chart(fig, use_container_width=True)
     
-    # Search button
-    search_button = st.button("🔍 Get results", type="primary", use_container_width=True)
+    with col2:
+        st.subheader("🎯 Position Distribution")
+        position_counts = merged_df['position'].value_counts()
+        fig = px.pie(
+            values=position_counts.values,
+            names=position_counts.index,
+            title='Players by Position'
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+# ============================================================================
+# PAGE: PLAYER DATABASE
+# ============================================================================
+
+def show_player_database(conn):
+    st.title("👤 Player Database")
     
-    if search_button:
-        with st.spinner("Searching database..."):
-            results = search_restaurants(name_input, vote_range[0], vote_range[1])
+    players_df = get_all_players(conn)
+    stats_df = get_player_stats(conn)
+    contracts_df = get_contracts(conn)
+    
+    # Merge data
+    full_df = pd.merge(players_df, stats_df, on='player_id')
+    full_df = pd.merge(full_df, contracts_df, on='player_id')
+    full_df['value_index'] = full_df.apply(calculate_value_index, axis=1)
+    
+    # Search and filters
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        search_name = st.text_input("🔍 Search by Name", "")
+    with col2:
+        filter_position = st.selectbox("Position", ["All"] + sorted(full_df['position'].unique().tolist()))
+    with col3:
+        filter_team = st.selectbox("Team", ["All"] + sorted(full_df['team'].unique().tolist()))
+    
+    # Apply filters
+    filtered_df = full_df.copy()
+    if search_name:
+        filtered_df = filtered_df[filtered_df['name'].str.contains(search_name, case=False)]
+    if filter_position != "All":
+        filtered_df = filtered_df[filtered_df['position'] == filter_position]
+    if filter_team != "All":
+        filtered_df = filtered_df[filtered_df['team'] == filter_team]
+    
+    st.markdown("---")
+    
+    # Display player cards
+    st.subheader(f"📋 Players ({len(filtered_df)} found)")
+    
+    for idx, row in filtered_df.iterrows():
+        with st.expander(f"**{row['name']}** - {row['position']} | {row['team']}"):
+            col1, col2, col3 = st.columns([1, 2, 2])
             
-            if results:
-                # CUSTOMIZATION: Enhanced data display with color-coded count (CUSTOMIZATION #3)
-                st.success(f"✅ Found {len(results)} restaurant(s)")
-                
-                # Convert to DataFrame for better display
-                df = pd.DataFrame(results, columns=['Restaurant Name', 'Votes', 'City'])
-                
-                # Display as styled table
-                st.dataframe(
-                    df,
-                    use_container_width=True,
-                    height=400,
-                    hide_index=True
-                )
-                
-                # Additional statistics
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Total Results", len(results))
-                with col2:
-                    st.metric("Avg Votes", f"{df['Votes'].mean():.0f}")
-                with col3:
-                    st.metric("Max Votes", df['Votes'].max())
-                
-            else:
-                st.warning("⚠️ No restaurants found matching your criteria. Try adjusting the filters.")
-    
-    # Instructions
-    with st.expander("ℹ️ How to use"):
-        st.markdown("""
-        - **Empty name field**: Shows all restaurants within the vote range
-        - **Specific name**: Searches for restaurants containing that text
-        - **Vote range**: Filter restaurants by popularity (vote count)
-        - **Combined filters**: Both filters work together for precise results
-        
-        **Example Searches:**
-        - Name: "Dishoom" → Shows all Dishoom locations
-        - Votes: 0-500 → Shows restaurants with 0 to 500 votes
-        - Both: Name "Pizza" + Votes 100-1000 → Shows pizza places with 100-1000 votes
-        """)
-
-# ============================================================================
-# TAB 3: INTERACTIVE MAP (QUESTION 2 - 40 POINTS)
-# ============================================================================
-elif tab_selection == "🗺️ Interactive Map":
-    st.title("🗺️ Restaurant Locations in London")
-    st.markdown("Explore restaurant locations on an interactive map")
-    
-    # Display button
-    map_button = st.button(
-        "🗺️ Display map!",
-        type="primary",
-        use_container_width=True,
-        help="Map of restaurants in London. Click on teardrop to check names."
-    )
-    
-    st.caption("Map of restaurants in London. Click on teardrop to check names.")
-    
-    if map_button or 'show_map' in st.session_state:
-        st.session_state['show_map'] = True
-        
-        with st.spinner("Loading restaurant locations..."):
-            # Get location data
-            location_df = get_restaurant_locations()
+            with col1:
+                img = get_player_image(row['player_id'])
+                if img:
+                    st.image(img, use_container_width=True)
+                else:
+                    st.write("🏀")
             
-            if not location_df.empty:
-                st.success(f"✅ Loaded {len(location_df)} restaurant locations")
-                
-                # Create folium map centered on London
-                # CUSTOMIZATION: Using CartoDB Positron tiles (CUSTOMIZATION #3)
-                m = folium.Map(
-                    location=[51.5074, -0.1278],
-                    zoom_start=12,
-                    tiles='CartoDB positron'
-                )
-                
-                # Add markers for each restaurant with pink/green theme
-                for idx, row in location_df.iterrows():
-                    folium.Marker(
-                        location=[row['latitude'], row['longitude']],
-                        popup=folium.Popup(row['name'], max_width=300),
-                        tooltip=row['name'],
-                        icon=folium.Icon(color='pink', icon='cutlery', prefix='fa')
-                    ).add_to(m)
-                
-                # Display map
-                st_folium(m, width=1400, height=600)
-                
-                # Statistics
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric("Total Restaurants on Map", len(location_df))
-                with col2:
-                    st.info("💡 Click on any pink marker to see the restaurant name")
-                
-            else:
-                st.error("❌ No location data available")
+            with col2:
+                st.markdown("**Personal Info**")
+                st.write(f"Age: {row['age']}")
+                st.write(f"Height: {row['height']}")
+                st.write(f"Weight: {row['weight']} lbs")
+                st.write(f"Experience: {row['years_in_league']} years")
+                st.write(f"Draft: {row['draft_year']} (Pick #{row['draft_position']})")
+            
+            with col3:
+                st.markdown("**2023-24 Stats**")
+                st.write(f"PPG: {row['points_per_game']:.1f}")
+                st.write(f"RPG: {row['rebounds_per_game']:.1f}")
+                st.write(f"APG: {row['assists_per_game']:.1f}")
+                st.write(f"FG%: {row['field_goal_pct']:.1f}%")
+                st.write(f"PER: {row['per']:.1f}")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Annual Salary", f"${row['annual_salary']:.1f}M")
+            with col2:
+                st.metric("Value Index", f"{row['value_index']:.1f}", 
+                         delta=f"{row['value_index'] - full_df['value_index'].mean():.1f} vs avg")
+
+# ============================================================================
+# PAGE: ANALYTICS
+# ============================================================================
+
+def show_analytics(conn):
+    st.title("📊 Advanced Analytics")
     
-    # Map information
-    with st.expander("ℹ️ Map Information"):
-        st.markdown("""
-        **Map Features:**
-        - 🗺️ Custom CartoDB Positron tiles for clean visualization
-        - 📍 Pink markers indicate restaurant locations
-        - 🖱️ Click markers to see restaurant names
-        - 🔍 Zoom in/out using the +/- buttons
-        - 🌍 Pan around the map by clicking and dragging
+    players_df = get_all_players(conn)
+    stats_df = get_player_stats(conn)
+    contracts_df = get_contracts(conn)
+    
+    # Merge data
+    full_df = pd.merge(players_df, stats_df, on='player_id')
+    full_df = pd.merge(full_df, contracts_df, on='player_id')
+    full_df['value_index'] = full_df.apply(calculate_value_index, axis=1)
+    full_df['efficiency_rating'] = (full_df['value_index'] / full_df['annual_salary']) * 10
+    
+    tab1, tab2, tab3 = st.tabs(["💎 Value Analysis", "📈 Performance Trends", "🎯 Position Comparison"])
+    
+    with tab1:
+        st.subheader("Contract Efficiency Analysis")
         
-        **Note:** Only restaurants with valid coordinates are displayed on the map.
-        """)
-
-# ============================================================================
-# FOOTER
-# ============================================================================
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 📝 About")
-st.sidebar.info("""
-This dashboard connects to a MySQL database containing restaurant information 
-and provides search and visualization capabilities.
-""")
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("Made with ❤️ using Streamlit")
+        # Efficiency scatter
+        fig = px.scatter(
+            full_df,
+            x='annual_salary',
+            y='value_index',
+            size='points_per_game',
+            color='efficiency_rating',
+            hover_data=['name', 'team', 'position'],
+            title='Player Value vs Contract (Size = PPG, Color = Efficiency)',
+            labels={'annual_salary': 'Annual Salary ($M)', 'value_index': 'Value Index'},
+            color_continuous_scale='RdYlGn'
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**🔥 Best Value Contracts**")
+            best_value = full_df.nlargest(5, 'efficiency_rating')[['name', 'annual_salary', 'value_index', 'efficiency_rating']]
+            best_value['annual_salary'] = best_value['annual_salary'].apply(lambda x: f"${x:.1f}M")
+            best_value['efficiency_rating'] = best_value['efficiency_rating'].apply(lambda x: f"{x:.2f}")
+            st.dataframe(best_value, hide_index=True, use_container_width=True)
+        
+        with col2:
+            st.markdown("**⚠️ Overvalued Contracts**")
+            worst_value = full_df.nsmallest(5, 'efficiency_rating')[['name', 'annual_salary', 'value_index', 'efficiency_rating']]
+            worst_value['annual_salary'] = worst_value['annual_salary'].apply(lambda x: f"${x:.1f}M")
+            worst_value['efficiency_rating'] = worst_value['efficiency_rating'].apply(lambda x: f"{x:.2f}")
+            st.dataframe(worst_value, hide_index=True, use_container_width=True)
+    
+    with tab2:
+        st.subheader("Performance Metrics Distribution")
+        
+        metric = st.selectbox("Select Metric", 
+                             ['points_per_game', 'rebounds_per_game', 'assists_per_game', 
+                              'field_goal_pct', 'per', 'win_shares'])
+        
+        fig = px.histogram(
+            full_df,
+            x=metric,
+            nbins=20,
+            title=f'{metric.replace("_", " ").title()} Distribution',
+            labels={metric: metric.replace("_", " ").title()}
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Box plot by position
+        fig = px.box(
+            full_df,
+            x='position',
+            y=metric,
+            title=f'{metric.replace("_", " ").title()} by Position',
+            labels={metric: metric.replace("_", " ").title()}
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with tab3:
+        st.subheader("Position-Based Analysis")
+        
+        # Average stats by position
+        position_stats = full_df.groupby('position').agg({
+            'points_per_game': 'mean',
+            'rebounds_per_game': 'mean',
+            'assists_per_game': 'mean',
+            'annual_salary': 'mean',
+            'value_index': 'mean'
+        }).round(2)
+        
+        st.dataframe(position_stats, use_container_width=True)
+        
+        # Radar chart for selected player
+        selected_player = st.selectbox("Select Player for Radar Chart", full_df['name'].tolist())
+        player_data = full_df[full_df['name'] == selected_player].iloc[0]
+        
+        categories = ['PPG', 'RPG', 'APG', 'FG%', 'PER']
+        values = [
+            player_data['points_per_game'] / 35 * 100,
+            player_data['rebounds_per_game'] / 15 * 100,
+            player_data['assists_per_game'] / 12 * 100,
+            player_data['field_goal_pct'] / 60 * 100,
+            player_data['per'] /
                 
