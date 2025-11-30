@@ -614,5 +614,300 @@ def show_analytics(conn):
             player_data['rebounds_per_game'] / 15 * 100,
             player_data['assists_per_game'] / 12 * 100,
             player_data['field_goal_pct'] / 60 * 100,
-            player_data['per'] /
+            player_data['per'] / 35 * 100
+        ]
+        
+        fig = go.Figure()
+        fig.add_trace(go.Scatterpolar(
+            r=values,
+            theta=categories,
+            fill='toself',
+            name=selected_player
+        ))
+        fig.update_layout(
+            polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+            showlegend=True,
+            title=f"{selected_player} Performance Radar"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+# ============================================================================
+# PAGE: CONTRACT MANAGER
+# ============================================================================
+
+def show_contract_manager(conn):
+    st.title("💰 Contract Manager")
+    
+    tab1, tab2 = st.tabs(["📋 View Contracts", "➕ Add/Edit Contract"])
+    
+    with tab1:
+        contracts_df = get_contracts(conn)
+        players_df = get_all_players(conn)
+        
+        # Merge for display
+        display_df = pd.merge(contracts_df, players_df[['player_id', 'name', 'position']], on='player_id')
+        display_df = display_df[['name', 'position', 'team', 'annual_salary', 'total_value', 
+                                 'start_date', 'end_date', 'contract_type']]
+        display_df = display_df.sort_values('annual_salary', ascending=False)
+        
+        # Display contracts
+        st.dataframe(
+            display_df.style.format({
+                'annual_salary': '${:.1f}M',
+                'total_value': '${:.1f}M'
+            }),
+            hide_index=True,
+            use_container_width=True
+        )
+        
+        # Contract summary
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Contracts", len(contracts_df))
+        with col2:
+            st.metric("Total Annual Spend", f"${contracts_df['annual_salary'].sum():.1f}M")
+        with col3:
+            st.metric("Avg Contract", f"${contracts_df['annual_salary'].mean():.1f}M")
+    
+    with tab2:
+        st.subheader("Add New Contract")
+        
+        players_df = get_all_players(conn)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            selected_player_name = st.selectbox("Select Player", players_df['name'].tolist())
+            player_id = players_df[players_df['name'] == selected_player_name]['player_id'].values[0]
+            team = st.text_input("Team", players_df[players_df['name'] == selected_player_name]['team'].values[0])
+            contract_type = st.selectbox("Contract Type", 
+                                        ["Max Contract", "Veteran Extension", "Rookie Contract", 
+                                         "Mid-Level Exception", "Minimum Contract"])
+        
+        with col2:
+            start_date = st.date_input("Start Date", datetime.now())
+            years = st.slider("Contract Length (years)", 1, 5, 4)
+            end_date = start_date + timedelta(days=365 * years)
+            st.write(f"End Date: {end_date}")
+            annual_salary = st.number_input("Annual Salary ($M)", min_value=1.0, max_value=60.0, value=30.0, step=0.5)
+            total_value = annual_salary * years
+            st.write(f"**Total Value:** ${total_value:.1f}M")
+        
+        if st.button("💾 Save Contract", type="primary"):
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO contracts (player_id, team, start_date, end_date, total_value, annual_salary, contract_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (int(player_id), team, str(start_date), str(end_date), total_value, annual_salary, contract_type))
+            conn.commit()
+            st.success(f"✅ Contract added for {selected_player_name}!")
+            st.cache_data.clear()
+            st.rerun()
+
+# ============================================================================
+# PAGE: INJURY TRACKER
+# ============================================================================
+
+def show_injury_tracker(conn):
+    st.title("🏥 Injury Tracker")
+    
+    injuries_df = get_injuries(conn)
+    players_df = get_all_players(conn)
+    
+    # Merge data
+    injury_display = pd.merge(injuries_df, players_df[['player_id', 'name', 'team']], on='player_id')
+    
+    tab1, tab2 = st.tabs(["📊 Injury Overview", "➕ Add Injury Record"])
+    
+    with tab1:
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Total Injuries", len(injuries_df))
+        with col2:
+            st.metric("Total Games Missed", injuries_df['games_missed'].sum())
+        with col3:
+            recurring_count = injuries_df['recurring'].sum()
+            st.metric("Recurring Injuries", recurring_count)
+        
+        st.markdown("---")
+        
+        # Recent injuries
+        st.subheader("Recent Injuries")
+        recent_injuries = injury_display.sort_values('injury_date', ascending=False)
+        st.dataframe(
+            recent_injuries[['name', 'team', 'injury_type', 'injury_date', 'return_date', 'games_missed', 'recurring']],
+            hide_index=True,
+            use_container_width=True
+        )
+        
+        # Injury type distribution
+        st.subheader("Injury Types Distribution")
+        injury_types = injuries_df['injury_type'].value_counts()
+        fig = px.bar(
+            x=injury_types.index,
+            y=injury_types.values,
+            labels={'x': 'Injury Type', 'y': 'Count'},
+            title='Most Common Injuries'
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with tab2:
+        st.subheader("Add Injury Record")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            selected_player = st.selectbox("Player", players_df['name'].tolist())
+            player_id = players_df[players_df['name'] == selected_player]['player_id'].values[0]
+            injury_type = st.text_input("Injury Type", "Ankle Sprain")
+            injury_date = st.date_input("Injury Date", datetime.now())
+        
+        with col2:
+            return_date = st.date_input("Expected Return Date", datetime.now() + timedelta(days=14))
+            games_missed = st.number_input("Games Missed", min_value=0, value=5, step=1)
+            recurring = st.checkbox("Recurring Injury")
+        
+        if st.button("💾 Save Injury Record", type="primary"):
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO injuries (player_id, injury_type, injury_date, return_date, games_missed, recurring)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (int(player_id), injury_type, str(injury_date), str(return_date), games_missed, recurring))
+            conn.commit()
+            st.success("✅ Injury record added!")
+            st.cache_data.clear()
+            st.rerun()
+
+# ============================================================================
+# PAGE: SQL CHAT
+# ============================================================================
+
+def show_sql_chat(conn):
+    st.title("💬 SQL Chat Interface")
+    
+    st.markdown("""
+    Ask questions about the database in natural language. The system will translate your 
+    question into SQL and execute it.
+    """)
+    
+    # Example questions
+    with st.expander("📝 Example Questions"):
+        st.markdown("""
+        - Show me all players making over $40M per year
+        - Who are the top 5 scorers?
+        - Which players have recurring injuries?
+        - What's the average salary by position?
+        - Show me all point guards under 25 years old
+        """)
+    
+    # Query input
+    user_query = st.text_area("Ask a question about the NBA database:", height=100)
+    
+    if st.button("🔍 Search", type="primary"):
+        if user_query:
+            with st.spinner("Translating and executing query..."):
+                # Simple query translation (in production, use LLM)
+                sql_query = translate_natural_to_sql(user_query)
                 
+                st.code(sql_query, language='sql')
+                
+                try:
+                    result_df = pd.read_sql_query(sql_query, conn)
+                    st.subheader("Results:")
+                    st.dataframe(result_df, use_container_width=True)
+                    
+                    st.download_button(
+                        "📥 Download Results (CSV)",
+                        result_df.to_csv(index=False),
+                        "query_results.csv",
+                        "text/csv"
+                    )
+                except Exception as e:
+                    st.error(f"Error executing query: {str(e)}")
+        else:
+            st.warning("Please enter a question!")
+    
+    # Show database schema
+    with st.expander("📚 Database Schema"):
+        st.markdown("""
+        **Tables:**
+        - `players`: player_id, name, position, team, age, height, weight, years_in_league, draft_year, draft_position
+        - `contracts`: contract_id, player_id, team, start_date, end_date, total_value, annual_salary, contract_type
+        - `performance_stats`: stat_id, player_id, season, games_played, minutes_per_game, points_per_game, rebounds_per_game, assists_per_game, field_goal_pct, three_point_pct, free_throw_pct, usage_rate, win_shares, per
+        - `injuries`: injury_id, player_id, injury_type, injury_date, return_date, games_missed, recurring
+        - `teams`: team_id, team_name, city, conference, division, current_payroll, salary_cap_space, luxury_tax_status
+        """)
+
+def translate_natural_to_sql(query):
+    """Simple rule-based translation (replace with LLM in production)"""
+    query_lower = query.lower()
+    
+    # Simple pattern matching
+    if "over" in query_lower and "million" in query_lower or "$" in query_lower:
+        # Extract amount
+        import re
+        amount = re.findall(r'\d+', query_lower)
+        if amount:
+            amount = amount[0]
+            return f"""
+                SELECT p.name, p.position, p.team, c.annual_salary
+                FROM players p
+                JOIN contracts c ON p.player_id = c.player_id
+                WHERE c.annual_salary > {amount}
+                ORDER BY c.annual_salary DESC
+            """
+    
+    elif "top" in query_lower and "scorer" in query_lower:
+        amount = "5"
+        import re
+        nums = re.findall(r'\d+', query_lower)
+        if nums:
+            amount = nums[0]
+        return f"""
+            SELECT p.name, p.team, ps.points_per_game
+            FROM players p
+            JOIN performance_stats ps ON p.player_id = ps.player_id
+            ORDER BY ps.points_per_game DESC
+            LIMIT {amount}
+        """
+    
+    elif "recurring" in query_lower and "injur" in query_lower:
+        return """
+            SELECT p.name, p.team, i.injury_type, i.games_missed
+            FROM players p
+            JOIN injuries i ON p.player_id = i.player_id
+            WHERE i.recurring = 1
+        """
+    
+    elif "average salary" in query_lower and "position" in query_lower:
+        return """
+            SELECT p.position, AVG(c.annual_salary) as avg_salary, COUNT(*) as player_count
+            FROM players p
+            JOIN contracts c ON p.player_id = c.player_id
+            GROUP BY p.position
+            ORDER BY avg_salary DESC
+        """
+    
+    elif "point guard" in query_lower and "under" in query_lower:
+        import re
+        age = re.findall(r'\d+', query_lower)
+        if age:
+            age = age[0]
+            return f"""
+                SELECT p.name, p.age, p.team, ps.points_per_game, ps.assists_per_game
+                FROM players p
+                JOIN performance_stats ps ON p.player_id = ps.player_id
+                WHERE p.position = 'PG' AND p.age < {age}
+                ORDER BY ps.assists_per_game DESC
+            """
+    
+    # Default fallback
+    return "SELECT * FROM players LIMIT 10"
+
+# ============================================================================
+# RUN APP
+# ============================================================================
+
+if __name__ == "__main__":
+    main()
