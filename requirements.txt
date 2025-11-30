@@ -3,3 +3,9 @@ mysql-connector-python
 pandas
 folium
 streamlit-folium
+sqlite3
+ plotly.express
+ plotly.graph_objects 
+datetime
+timedelta
+ requests
